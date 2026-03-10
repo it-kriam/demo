@@ -10,7 +10,10 @@ import org.springframework.web.bind.annotation.RestController;
 public class DemoController {
 
    @GetMapping("/dummy")
- public String dummyapi(@RequestParam String param){
+ public String dummyapi(@RequestParam(required = false) String param){
+       if(param != null){
+        return param;
+       }
      return param;
  }
 }
