@@ -1,18 +1,13 @@
 name: 🤖 Claude PR Review
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
-  pull_request_review:
-    types: [submitted]
   pull_request:
     types: [opened, synchronize, reopened]
 
-# ── Permissions ────────────────────────────────────────────────────────────────
-# Taken from Anthropic's official solutions.md examples
 permissions:
   contents: read
   pull-requests: write
@@ -21,16 +16,13 @@ permissions:
 
 jobs:
 
-  # ── Job 1: @claude mention handler ────────────────────────────────────────
+  # ── Job 1: @claude mention in PR comments ───────────────────
   claude-interactive:
     name: 💬 Claude (@claude mention)
     runs-on: ubuntu-latest
-
-    # Only run when @claude is mentioned
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
 
     steps:
       - name: 📥 Checkout
@@ -39,16 +31,14 @@ jobs:
           fetch-depth: 1
 
       - name: 🤖 Claude Code Action
-        # ✅ Pinned to last known stable commit — avoids SDK crash bug in @v1
-        uses: anthropics/claude-code-action@4a0e9f6ab1a4b13f82f062ef99adae32a5f74e89
+        uses: anthropics/claude-code-action@v1.0.69
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
-  # ── Job 2: Auto-review every PR ───────────────────────────────────────────
+  # ── Job 2: Auto-review on every PR ──────────────────────────
   claude-auto-review:
     name: 🔍 Claude Auto Review
     runs-on: ubuntu-latest
-
     if: |
       github.event_name == 'pull_request' &&
       github.actor != 'dependabot[bot]' &&
@@ -61,46 +51,36 @@ jobs:
           fetch-depth: 1
 
       - name: 🤖 Claude Auto Review
-        # ✅ Pinned to last known stable commit — avoids SDK crash bug in @v1
-        uses: anthropics/claude-code-action@4a0e9f6ab1a4b13f82f062ef99adae32a5f74e89
+        uses: anthropics/claude-code-action@v1.0.69
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
             You are a senior Java software engineer. Review this pull request thoroughly.
-
-            Provide a structured review in this exact format:
 
             ## 📋 Summary
             [2-3 sentences: what this PR does and overall quality]
 
             ## 🔴 Critical Issues
             [Bugs, NullPointerExceptions, logic errors, thread-safety, data loss]
-            [File name + line number + problem + suggested fix for each]
-            [If none: "No critical issues found."]
+            [File name + line number + problem + fix. If none: "No critical issues found."]
 
             ## 🟡 Java Best Practices
-            [SOLID violations, missing @Override, raw types, resource leaks,
-             improper exception handling, magic numbers, God classes]
+            [SOLID violations, resource leaks, raw types, missing @Override, magic numbers]
             [If none: "No improvements suggested."]
 
             ## 🔒 Security Concerns
-            [SQL injection, hardcoded secrets, insecure deserialization,
-             missing input validation, sensitive data in logs]
+            [SQL injection, hardcoded secrets, missing input validation]
             [If none: "No security concerns found."]
 
             ## 🧪 Test Coverage
-            [Are JUnit 5 / Mockito tests present? What is missing?
-             What edge cases and boundary values should be tested?]
+            [JUnit 5 / Mockito tests present? What edge cases are missing?]
 
             ## ⚡ Performance
-            [N+1 queries, inefficient collections, unnecessary object creation]
+            [N+1 queries, inefficient loops, blocking calls]
             [If none: "No performance concerns."]
 
             ## 🟢 Positives
-            [Clean design, good patterns, proper Java features, well-named methods]
+            [Clean design, good patterns, proper Java usage]
 
             ## 📊 Score: X/10
 
