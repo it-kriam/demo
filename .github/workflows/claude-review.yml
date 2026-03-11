@@ -1,95 +1,142 @@
 name: 🤖 Claude PR Review
 
 on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
   pull_request:
     types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
-# Minimum permissions required — from official Anthropic docs
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
-
-  # ── Job 1: Respond to @claude mentions ──────────────────────
-  claude-interactive:
-    name: 💬 Claude (@claude mention)
+  claude-review:
+    name: 🔍 Claude Code Review
     runs-on: ubuntu-latest
+
+    # Run on PR open/update OR when @claude is mentioned in a comment
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          additional_permissions: |
-            actions: read
-          claude_args: --max-turns 10
+      - name: 🔍 Get PR diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get PR number
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          else
+            PR_NUMBER=${{ github.event.issue.number }}
+          fi
 
-  # ── Job 2: Auto-review every PR ─────────────────────────────
-  claude-auto-review:
-    name: 🔍 Claude Auto Review
-    runs-on: ubuntu-latest
-    if: |
-      github.event_name == 'pull_request' &&
-      github.actor != 'dependabot[bot]' &&
-      github.actor != 'github-actions[bot]'
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+          # Fetch diff (limit to 8000 chars to stay within API limits)
+          DIFF=$(gh pr diff $PR_NUMBER 2>/dev/null | head -c 8000)
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
+          PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body | head -c 500)
+          PR_AUTHOR=$(gh pr view $PR_NUMBER --json author -q .author.login)
+          FILES=$(gh pr view $PR_NUMBER --json files -q '.files[].path' | head -20 | tr '\n' ', ')
 
-      - name: 🤖 Claude Auto Review
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          additional_permissions: |
-            actions: read
-          claude_args: --max-turns 5
-          prompt: |
-            You are a senior Java software engineer. Review this pull request thoroughly.
+          # Save to file to avoid shell escaping issues
+          cat > /tmp/pr_info.txt << PREOF
+          PR Title  : $PR_TITLE
+          PR Author : $PR_AUTHOR
+          PR Files  : $FILES
+          Description: $PR_BODY
+          PREOF
 
-            ## 📋 Summary
-            [2-3 sentences: what this PR does and overall quality]
+          echo "$DIFF" > /tmp/pr_diff.txt
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
 
-            ## 🔴 Critical Issues
-            [Bugs, NullPointerExceptions, logic errors, thread-safety, data loss]
-            [File name + line number + problem + fix. If none: "No critical issues found."]
+      - name: 🤖 Call Claude API directly
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          PR_INFO=$(cat /tmp/pr_info.txt)
+          DIFF=$(cat /tmp/pr_diff.txt)
 
-            ## 🟡 Java Best Practices
-            [SOLID violations, resource leaks, raw types, missing @Override, magic numbers]
-            [If none: "No improvements suggested."]
+          # Build JSON payload using jq — handles all escaping correctly
+          PAYLOAD=$(jq -n \
+            --arg model "claude-opus-4-5" \
+            --arg system "You are a senior Java software engineer doing a PR code review. Be specific, constructive, and always reference file names and line numbers when raising issues." \
+            --arg content "Review this Java pull request:
 
-            ## 🔒 Security Concerns
-            [SQL injection, hardcoded secrets, missing input validation]
-            [If none: "No security concerns found."]
+          $PR_INFO
 
-            ## 🧪 Test Coverage
-            [JUnit 5 / Mockito tests present? What edge cases are missing?]
+          DIFF:
+          $DIFF
 
-            ## ⚡ Performance
-            [N+1 queries, inefficient loops, blocking calls]
-            [If none: "No performance concerns."]
+          Provide structured review:
 
-            ## 🟢 Positives
-            [Clean design, good patterns, proper Java usage]
+          ## 📋 Summary
+          [2-3 sentences on what this PR does]
 
-            ## 📊 Score: X/10
+          ## 🔴 Critical Issues
+          [Bugs, NPEs, logic errors, security issues. File + line + fix. If none: 'No critical issues found.']
 
-            ## ✅ Verdict
-            APPROVE | REQUEST_CHANGES | COMMENT — [one sentence reason]
+          ## 🟡 Java Best Practices
+          [SOLID violations, resource leaks, raw types, missing @Override. If none: 'No improvements needed.']
+
+          ## 🔒 Security Concerns
+          [SQL injection, hardcoded secrets, missing validation. If none: 'No security concerns.']
+
+          ## 🧪 Test Coverage
+          [Missing tests or edge cases]
+
+          ## 🟢 Positives
+          [What was done well]
+
+          ## 📊 Score: X/10
+
+          ## ✅ Verdict
+          APPROVE | REQUEST_CHANGES | COMMENT — one sentence reason" \
+            '{
+              model: $model,
+              max_tokens: 4096,
+              system: $system,
+              messages: [{role: "user", content: $content}]
+            }')
+
+          # Call Claude API
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD")
+
+          # Extract review text
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error: Could not get review"')
+
+          # Save review
+          echo "$REVIEW" > /tmp/review.txt
+          echo "Review generated successfully"
+          echo "preview=$(echo "$REVIEW" | head -c 100)" >> $GITHUB_OUTPUT
+
+      - name: 💬 Post review comment to PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.diff.outputs.pr_number }}
+          REVIEW=$(cat /tmp/review.txt)
+
+          COMMENT="## 🤖 Claude AI Code Review
+
+          $REVIEW
+
+          ---
+          *Reviewed by Claude AI · Not a substitute for human review*"
+
+          gh pr comment $PR_NUMBER --body "$COMMENT"
+          echo "✅ Review posted to PR #$PR_NUMBER"
