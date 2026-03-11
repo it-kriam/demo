@@ -16,127 +16,157 @@ jobs:
     name: 🔍 Claude Code Review
     runs-on: ubuntu-latest
 
-    # Run on PR open/update OR when @claude is mentioned in a comment
+    # Trigger 1: Any PR opened or updated
+    # Trigger 2: @claude mentioned in a PR comment
     if: |
       github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude'))
+      (github.event_name == 'issue_comment' && 
+       contains(github.event.comment.body, '@claude') &&
+       github.event.issue.pull_request != null)
 
     steps:
+      # ── Step 1: Checkout ──────────────────────────────────
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 🔍 Get PR diff
-        id: diff
+      # ── Step 2: Get PR number + diff ──────────────────────
+      - name: 🔍 Fetch PR info and diff
+        id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get PR number
+          # Resolve PR number from either trigger
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             PR_NUMBER=${{ github.event.pull_request.number }}
           else
             PR_NUMBER=${{ github.event.issue.number }}
           fi
+          echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-
-          # Fetch diff (limit to 8000 chars to stay within API limits)
-          DIFF=$(gh pr diff $PR_NUMBER 2>/dev/null | head -c 8000)
-          PR_TITLE=$(gh pr view $PR_NUMBER --json title -q .title)
-          PR_BODY=$(gh pr view $PR_NUMBER --json body -q .body | head -c 500)
+          # Fetch PR metadata
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title   -q .title)
           PR_AUTHOR=$(gh pr view $PR_NUMBER --json author -q .author.login)
-          FILES=$(gh pr view $PR_NUMBER --json files -q '.files[].path' | head -20 | tr '\n' ', ')
+          PR_BODY=$(gh pr view $PR_NUMBER --json body     -q .body | head -c 400)
+          FILES=$(gh pr view $PR_NUMBER --json files      -q '[.files[].path] | join(", ")' | head -c 300)
 
-          # Save to file to avoid shell escaping issues
-          cat > /tmp/pr_info.txt << PREOF
-          PR Title  : $PR_TITLE
-          PR Author : $PR_AUTHOR
-          PR Files  : $FILES
-          Description: $PR_BODY
-          PREOF
+          # Fetch diff — limit to 7000 chars to stay inside Claude context
+          DIFF=$(gh pr diff $PR_NUMBER | head -c 7000)
 
-          echo "$DIFF" > /tmp/pr_diff.txt
-          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          # Write to files to avoid shell escaping issues
+          printf '%s' "$PR_TITLE"  > /tmp/pr_title.txt
+          printf '%s' "$PR_AUTHOR" > /tmp/pr_author.txt
+          printf '%s' "$PR_BODY"   > /tmp/pr_body.txt
+          printf '%s' "$FILES"     > /tmp/pr_files.txt
+          printf '%s' "$DIFF"      > /tmp/pr_diff.txt
 
-      - name: 🤖 Call Claude API directly
-        id: review
+          echo "✅ Fetched PR #$PR_NUMBER: $PR_TITLE"
+
+      # ── Step 3: Call Claude API directly via curl ─────────
+      - name: 🤖 Call Claude API
+        id: claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          PR_INFO=$(cat /tmp/pr_info.txt)
+          PR_TITLE=$(cat /tmp/pr_title.txt)
+          PR_AUTHOR=$(cat /tmp/pr_author.txt)
+          PR_BODY=$(cat /tmp/pr_body.txt)
+          FILES=$(cat /tmp/pr_files.txt)
           DIFF=$(cat /tmp/pr_diff.txt)
 
-          # Build JSON payload using jq — handles all escaping correctly
-          PAYLOAD=$(jq -n \
-            --arg model "claude-opus-4-5" \
-            --arg system "You are a senior Java software engineer doing a PR code review. Be specific, constructive, and always reference file names and line numbers when raising issues." \
-            --arg content "Review this Java pull request:
+          # Build prompt
+          PROMPT="You are a senior Java software engineer doing a PR code review.
 
-          $PR_INFO
+          PR Title  : $PR_TITLE
+          Author    : $PR_AUTHOR
+          Files     : $FILES
+          Description: $PR_BODY
 
           DIFF:
           $DIFF
 
-          Provide structured review:
+          Review this Java PR with the following structure:
 
           ## 📋 Summary
-          [2-3 sentences on what this PR does]
+          [2-3 sentences: what this PR does and overall quality]
 
           ## 🔴 Critical Issues
-          [Bugs, NPEs, logic errors, security issues. File + line + fix. If none: 'No critical issues found.']
+          [Bugs, NullPointerExceptions, logic errors, data loss, thread-safety]
+          [Format: filename + line + issue + fix. If none: No critical issues found.]
 
           ## 🟡 Java Best Practices
-          [SOLID violations, resource leaks, raw types, missing @Override. If none: 'No improvements needed.']
+          [SOLID violations, resource leaks, raw types, missing @Override, magic numbers]
+          [If none: No improvements needed.]
 
           ## 🔒 Security Concerns
-          [SQL injection, hardcoded secrets, missing validation. If none: 'No security concerns.']
+          [SQL injection, hardcoded secrets, missing input validation, exposed data]
+          [If none: No security concerns found.]
 
           ## 🧪 Test Coverage
-          [Missing tests or edge cases]
+          [JUnit 5 / Mockito tests present? What edge cases are untested?]
+
+          ## ⚡ Performance
+          [N+1 queries, inefficient loops, unnecessary object creation]
+          [If none: No performance concerns.]
 
           ## 🟢 Positives
-          [What was done well]
+          [Clean design, good patterns, proper Java usage, well-named methods]
 
           ## 📊 Score: X/10
 
           ## ✅ Verdict
-          APPROVE | REQUEST_CHANGES | COMMENT — one sentence reason" \
+          APPROVE | REQUEST_CHANGES | COMMENT — one sentence reason"
+
+          # Build JSON payload using jq (handles all escaping safely)
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
             '{
-              model: $model,
+              model: "claude-opus-4-5",
               max_tokens: 4096,
-              system: $system,
-              messages: [{role: "user", content: $content}]
+              system: "You are a senior Java software engineer. Be specific and constructive. Always reference file names and line numbers.",
+              messages: [{role: "user", content: $prompt}]
             }')
 
-          # Call Claude API
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          # Call Anthropic API directly — no SDK, no CLI, no crashes
+          RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d "$PAYLOAD")
 
+          if [ $? -ne 0 ]; then
+            echo "❌ Claude API call failed"
+            exit 1
+          fi
+
           # Extract review text
-          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error: Could not get review"')
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text')
 
-          # Save review
-          echo "$REVIEW" > /tmp/review.txt
-          echo "Review generated successfully"
-          echo "preview=$(echo "$REVIEW" | head -c 100)" >> $GITHUB_OUTPUT
+          if [ -z "$REVIEW" ] || [ "$REVIEW" = "null" ]; then
+            echo "❌ Empty response from Claude"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
 
-      - name: 💬 Post review comment to PR
+          # Save review to file
+          printf '%s' "$REVIEW" > /tmp/review.txt
+          echo "✅ Review generated ($(wc -c < /tmp/review.txt) bytes)"
+
+      # ── Step 4: Post review comment to PR ─────────────────
+      - name: 💬 Post review to PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_NUMBER=${{ steps.diff.outputs.pr_number }}
+          PR_NUMBER=${{ steps.pr.outputs.number }}
           REVIEW=$(cat /tmp/review.txt)
 
-          COMMENT="## 🤖 Claude AI Code Review
+          # Post as PR comment
+          gh pr comment "$PR_NUMBER" --body "## 🤖 Claude AI Code Review
 
           $REVIEW
 
           ---
-          *Reviewed by Claude AI · Not a substitute for human review*"
+          *Reviewed by Claude AI via direct API · Not a substitute for human review*"
 
-          gh pr comment $PR_NUMBER --body "$COMMENT"
           echo "✅ Review posted to PR #$PR_NUMBER"
