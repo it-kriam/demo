@@ -9,11 +9,10 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  id-token: write
-  contents: write          # write needed by claude-code-action
+  contents: read
   pull-requests: write
   issues: write
-  actions: read            # ✅ fixes exit code 1 in most cases
+  id-token: write
 
 jobs:
 
@@ -29,13 +28,12 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@v1.0.69
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}   # ✅ explicit token
 
   # ── Job 2: Auto-review on every PR ──────────────────────────
   claude-auto-review:
@@ -50,13 +48,12 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1
+      - name: 🤖 Claude Auto Review
+        uses: anthropics/claude-code-action@v1.0.69
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}   # ✅ explicit token
           prompt: |
             You are a senior Java software engineer. Review this pull request thoroughly.
 
@@ -65,10 +62,10 @@ jobs:
 
             ## 🔴 Critical Issues
             [Bugs, NullPointerExceptions, logic errors, thread-safety, data loss]
-            [File + line + problem + fix. If none: "No critical issues found."]
+            [File name + line number + problem + fix. If none: "No critical issues found."]
 
             ## 🟡 Java Best Practices
-            [SOLID violations, resource leaks, raw types, magic numbers]
+            [SOLID violations, resource leaks, raw types, missing @Override, magic numbers]
             [If none: "No improvements suggested."]
 
             ## 🔒 Security Concerns

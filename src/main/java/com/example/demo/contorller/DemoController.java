@@ -16,7 +16,7 @@ public class DemoController {
 
        for (int i = 0; i <= numbers.length; i++) {
 
-           int num = Integer.parseInt(numbers[i]);
+           int a = Integer.parseInt(numbers[i]);
        }
 
       Integer abc =  Integer.parseInt("AAA");
