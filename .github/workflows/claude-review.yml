@@ -16,28 +16,25 @@ jobs:
     name: 🔍 Claude Code Review
     runs-on: ubuntu-latest
 
-    # Trigger 1: Any PR opened or updated
-    # Trigger 2: @claude mentioned in a PR comment
     if: |
       github.event_name == 'pull_request' ||
-      (github.event_name == 'issue_comment' && 
+      (github.event_name == 'issue_comment' &&
        contains(github.event.comment.body, '@claude') &&
        github.event.issue.pull_request != null)
 
     steps:
-      # ── Step 1: Checkout ──────────────────────────────────
+      # ── Step 1: Checkout ────────────────────────────────────
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── Step 2: Get PR number + diff ──────────────────────
+      # ── Step 2: Fetch PR info ────────────────────────────────
       - name: 🔍 Fetch PR info and diff
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Resolve PR number from either trigger
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             PR_NUMBER=${{ github.event.pull_request.number }}
           else
@@ -45,25 +42,19 @@ jobs:
           fi
           echo "number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-          # Fetch PR metadata
-          PR_TITLE=$(gh pr view $PR_NUMBER --json title   -q .title)
+          PR_TITLE=$(gh pr view $PR_NUMBER --json title  -q .title)
           PR_AUTHOR=$(gh pr view $PR_NUMBER --json author -q .author.login)
-          PR_BODY=$(gh pr view $PR_NUMBER --json body     -q .body | head -c 400)
-          FILES=$(gh pr view $PR_NUMBER --json files      -q '[.files[].path] | join(", ")' | head -c 300)
+          FILES=$(gh pr view $PR_NUMBER --json files -q '[.files[].path] | join(", ")' | head -c 300)
+          DIFF=$(gh pr diff $PR_NUMBER | head -c 6000)
 
-          # Fetch diff — limit to 7000 chars to stay inside Claude context
-          DIFF=$(gh pr diff $PR_NUMBER | head -c 7000)
-
-          # Write to files to avoid shell escaping issues
           printf '%s' "$PR_TITLE"  > /tmp/pr_title.txt
           printf '%s' "$PR_AUTHOR" > /tmp/pr_author.txt
-          printf '%s' "$PR_BODY"   > /tmp/pr_body.txt
           printf '%s' "$FILES"     > /tmp/pr_files.txt
           printf '%s' "$DIFF"      > /tmp/pr_diff.txt
 
           echo "✅ Fetched PR #$PR_NUMBER: $PR_TITLE"
 
-      # ── Step 3: Call Claude API directly via curl ─────────
+      # ── Step 3: Call Claude API ──────────────────────────────
       - name: 🤖 Call Claude API
         id: claude
         env:
@@ -71,20 +62,12 @@ jobs:
         run: |
           PR_TITLE=$(cat /tmp/pr_title.txt)
           PR_AUTHOR=$(cat /tmp/pr_author.txt)
-          PR_BODY=$(cat /tmp/pr_body.txt)
           FILES=$(cat /tmp/pr_files.txt)
           DIFF=$(cat /tmp/pr_diff.txt)
 
-          # Build prompt
-          PROMPT="You are a senior Java software engineer doing a PR code review.
-
-          PR Title  : $PR_TITLE
-          Author    : $PR_AUTHOR
-          Files     : $FILES
-          Description: $PR_BODY
-
-          DIFF:
-          $DIFF
+          # Write prompt to file — avoids all shell escaping issues
+          cat > /tmp/prompt.txt << 'PROMPT_EOF'
+          You are a senior Java software engineer doing a PR code review. Be specific and constructive.
 
           Review this Java PR with the following structure:
 
@@ -100,7 +83,7 @@ jobs:
           [If none: No improvements needed.]
 
           ## 🔒 Security Concerns
-          [SQL injection, hardcoded secrets, missing input validation, exposed data]
+          [SQL injection, hardcoded secrets, missing input validation]
           [If none: No security concerns found.]
 
           ## 🧪 Test Coverage
@@ -111,49 +94,69 @@ jobs:
           [If none: No performance concerns.]
 
           ## 🟢 Positives
-          [Clean design, good patterns, proper Java usage, well-named methods]
+          [Clean design, good patterns, proper Java usage]
 
           ## 📊 Score: X/10
 
           ## ✅ Verdict
-          APPROVE | REQUEST_CHANGES | COMMENT — one sentence reason"
+          APPROVE | REQUEST_CHANGES | COMMENT — one sentence reason
+          PROMPT_EOF
 
-          # Build JSON payload using jq (handles all escaping safely)
-          PAYLOAD=$(jq -n \
-            --arg prompt "$PROMPT" \
+          PROMPT_TEXT=$(cat /tmp/prompt.txt)
+
+          # Build full user message combining PR info + diff + prompt
+          FULL_MSG="PR Title : $PR_TITLE
+          Author   : $PR_AUTHOR
+          Files    : $FILES
+
+          DIFF:
+          $DIFF
+
+          $PROMPT_TEXT"
+
+          # Build JSON safely using jq
+          jq -n \
+            --arg msg "$FULL_MSG" \
             '{
               model: "claude-opus-4-5",
               max_tokens: 4096,
-              system: "You are a senior Java software engineer. Be specific and constructive. Always reference file names and line numbers.",
-              messages: [{role: "user", content: $prompt}]
-            }')
+              system: "You are a senior Java software engineer. Always reference file names and line numbers.",
+              messages: [{role: "user", content: $msg}]
+            }' > /tmp/payload.json
 
-          # Call Anthropic API directly — no SDK, no CLI, no crashes
-          RESPONSE=$(curl -sf https://api.anthropic.com/v1/messages \
+          echo "📦 Payload size: $(wc -c < /tmp/payload.json) bytes"
+
+          # Call Anthropic API — use -w to show HTTP status, remove -f so we handle errors ourselves
+          HTTP_STATUS=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d "$PAYLOAD")
+            -d @/tmp/payload.json)
 
-          if [ $? -ne 0 ]; then
-            echo "❌ Claude API call failed"
+          echo "📡 HTTP Status: $HTTP_STATUS"
+
+          # Handle API errors explicitly
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "❌ API call failed with status $HTTP_STATUS"
+            echo "Response body:"
+            cat /tmp/response.json
             exit 1
           fi
 
           # Extract review text
-          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          REVIEW=$(jq -r '.content[0].text' /tmp/response.json)
 
           if [ -z "$REVIEW" ] || [ "$REVIEW" = "null" ]; then
-            echo "❌ Empty response from Claude"
-            echo "$RESPONSE" | jq .
+            echo "❌ Empty response from Claude. Full response:"
+            cat /tmp/response.json
             exit 1
           fi
 
-          # Save review to file
           printf '%s' "$REVIEW" > /tmp/review.txt
           echo "✅ Review generated ($(wc -c < /tmp/review.txt) bytes)"
 
-      # ── Step 4: Post review comment to PR ─────────────────
+      # ── Step 4: Post review comment ──────────────────────────
       - name: 💬 Post review to PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,12 +164,11 @@ jobs:
           PR_NUMBER=${{ steps.pr.outputs.number }}
           REVIEW=$(cat /tmp/review.txt)
 
-          # Post as PR comment
           gh pr comment "$PR_NUMBER" --body "## 🤖 Claude AI Code Review
 
           $REVIEW
 
           ---
-          *Reviewed by Claude AI via direct API · Not a substitute for human review*"
+          *Reviewed by Claude AI · Not a substitute for human review*"
 
-          echo "✅ Review posted to PR #$PR_NUMBER"
+          echo "✅ Posted to PR #$PR_NUMBER"
