@@ -1,46 +1,54 @@
 name: 🤖 Claude PR Review
 
+# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  pull_request_review:
+    types: [submitted]
   pull_request:
     types: [opened, synchronize, reopened]
 
+# ── Permissions ────────────────────────────────────────────────────────────────
+# Taken from Anthropic's official solutions.md examples
 permissions:
-  id-token: write
-  contents: write          # write needed by claude-code-action
+  contents: read
   pull-requests: write
   issues: write
-  actions: read            # ✅ fixes exit code 1 in most cases
+  id-token: write
 
 jobs:
 
-  # ── Job 1: @claude mention in PR comments ───────────────────
+  # ── Job 1: @claude mention handler ────────────────────────────────────────
   claude-interactive:
     name: 💬 Claude (@claude mention)
     runs-on: ubuntu-latest
+
+    # Only run when @claude is mentioned
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1
+        # ✅ Pinned to last known stable commit — avoids SDK crash bug in @v1
+        uses: anthropics/claude-code-action@4a0e9f6ab1a4b13f82f062ef99adae32a5f74e89
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}   # ✅ explicit token
 
-  # ── Job 2: Auto-review on every PR ──────────────────────────
+  # ── Job 2: Auto-review every PR ───────────────────────────────────────────
   claude-auto-review:
     name: 🔍 Claude Auto Review
     runs-on: ubuntu-latest
+
     if: |
       github.event_name == 'pull_request' &&
       github.actor != 'dependabot[bot]' &&
@@ -50,40 +58,49 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1
+      - name: 🤖 Claude Auto Review
+        # ✅ Pinned to last known stable commit — avoids SDK crash bug in @v1
+        uses: anthropics/claude-code-action@4a0e9f6ab1a4b13f82f062ef99adae32a5f74e89
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}   # ✅ explicit token
           prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
             You are a senior Java software engineer. Review this pull request thoroughly.
+
+            Provide a structured review in this exact format:
 
             ## 📋 Summary
             [2-3 sentences: what this PR does and overall quality]
 
             ## 🔴 Critical Issues
             [Bugs, NullPointerExceptions, logic errors, thread-safety, data loss]
-            [File + line + problem + fix. If none: "No critical issues found."]
+            [File name + line number + problem + suggested fix for each]
+            [If none: "No critical issues found."]
 
             ## 🟡 Java Best Practices
-            [SOLID violations, resource leaks, raw types, magic numbers]
+            [SOLID violations, missing @Override, raw types, resource leaks,
+             improper exception handling, magic numbers, God classes]
             [If none: "No improvements suggested."]
 
             ## 🔒 Security Concerns
-            [SQL injection, hardcoded secrets, missing input validation]
+            [SQL injection, hardcoded secrets, insecure deserialization,
+             missing input validation, sensitive data in logs]
             [If none: "No security concerns found."]
 
             ## 🧪 Test Coverage
-            [JUnit 5 / Mockito tests present? What edge cases are missing?]
+            [Are JUnit 5 / Mockito tests present? What is missing?
+             What edge cases and boundary values should be tested?]
 
             ## ⚡ Performance
-            [N+1 queries, inefficient loops, blocking calls]
+            [N+1 queries, inefficient collections, unnecessary object creation]
             [If none: "No performance concerns."]
 
             ## 🟢 Positives
-            [Clean design, good patterns, proper Java usage]
+            [Clean design, good patterns, proper Java features, well-named methods]
 
             ## 📊 Score: X/10
 
