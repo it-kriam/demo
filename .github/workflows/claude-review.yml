@@ -5,37 +5,44 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  pull_request_review:
+    types: [submitted]
   pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   issues: write
   id-token: write
+  actions: read
 
 jobs:
 
-  # ── Job 1: @claude mention in PR comments ───────────────────
+  # ── Job 1: @claude mention handler ──────────────────────────
   claude-interactive:
     name: 💬 Claude (@claude mention)
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
 
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: 🤖 Claude Code Action
-        uses: anthropics/claude-code-action@v1.0.69
+        # ✅ Pinned to SHA 01e756b — last known working version (Agent SDK 0.2.25)
+        # v1.0.69 and later use broken Agent SDK 0.2.27+ that crashes with exit code 1
+        uses: anthropics/claude-code-action@01e756bddc3a8891f36b00f6a269571e85561b6a
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Job 2: Auto-review on every PR ──────────────────────────
+  # ── Job 2: Auto-review every PR ─────────────────────────────
   claude-auto-review:
     name: 🔍 Claude Auto Review
     runs-on: ubuntu-latest
@@ -48,12 +55,14 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: 🤖 Claude Auto Review
-        uses: anthropics/claude-code-action@v1.0.69
+        # ✅ Pinned to SHA 01e756b — last known working version (Agent SDK 0.2.25)
+        uses: anthropics/claude-code-action@01e756bddc3a8891f36b00f6a269571e85561b6a
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
             You are a senior Java software engineer. Review this pull request thoroughly.
 
