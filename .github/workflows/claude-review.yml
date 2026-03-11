@@ -18,6 +18,7 @@ on:
 
 # ── Permissions ───────────────────────────────────────────────────────────────
 permissions:
+  id-token: write
   contents: read          # read source code
   pull-requests: write    # post review comments
   issues: write           # post issue comments
