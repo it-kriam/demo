@@ -1,21 +1,121 @@
-name: Claude PR Review
+name: 🤖 Claude PR Review
 
+# ── Triggers ─────────────────────────────────────────────────────────────────
+# 1. Responds to @claude mentions in PR comments
+# 2. Auto-reviews every new/updated PR (no mention needed)
 on:
+  # Trigger 1: Someone comments @claude in a PR or issue
   issue_comment:
     types: [created]
+
+  # Trigger 2: Someone leaves a PR review comment with @claude
   pull_request_review_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+  # Trigger 3: Auto-review when PR is opened or updated (no @claude needed)
+  pull_request:
+    types: [opened, synchronize, reopened]
 
+# ── Permissions ───────────────────────────────────────────────────────────────
+permissions:
+  id-token: write
+  contents: read          # read source code
+  pull-requests: write    # post review comments
+  issues: write           # post issue comments
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
 jobs:
-  claude:
-    if: contains(github.event.comment.body, '@claude')
+
+  # ── Job 1: Respond to @claude mentions ────────────────────────────────────
+  claude-interactive:
+    name: 💬 Claude Interactive (@claude mention)
     runs-on: ubuntu-latest
+
+    # Only run when @claude is mentioned in a comment
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+
     steps:
-      - uses: anthropics/claude-code-action@v1
+      - name: 🤖 Run Claude Code Action
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Java-specific review instructions injected into every response
+          claude_args: |
+            --append-system-prompt "You are a senior Java software engineer. When reviewing code focus on:
+            1. Bugs, NullPointerExceptions, logic errors
+            2. SOLID principles and Java best practices
+            3. Security vulnerabilities (SQL injection, hardcoded secrets)
+            4. Missing exception handling and resource leaks
+            5. Test coverage gaps (JUnit/Mockito)
+            6. Performance issues (N+1 queries, inefficient loops)
+            Always give a final verdict: APPROVE / REQUEST_CHANGES / COMMENT with a score out of 10."
+            --max-turns 10
+
+  # ── Job 2: Auto-review every PR ───────────────────────────────────────────
+  claude-auto-review:
+    name: 🔍 Claude Auto Review (every PR)
+    runs-on: ubuntu-latest
+
+    # Only run on PR events, skip bot PRs
+    if: |
+      github.event_name == 'pull_request' &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history needed to diff properly
+
+      - name: 🤖 Run Claude Auto Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+          # This prompt runs automatically on every PR — no @claude needed
+          prompt: |
+            You are a senior Java software engineer. Review this pull request thoroughly.
+
+            Provide a structured review in this exact format:
+
+            ## 📋 Summary
+            [2-3 sentences: what this PR does and overall quality]
+
+            ## 🔴 Critical Issues
+            [Bugs, NullPointerExceptions, logic errors, thread-safety, data loss]
+            [File name + line number + problem + fix for each]
+            [If none: "No critical issues found."]
+
+            ## 🟡 Java Best Practices
+            [SOLID violations, missing @Override, raw types, resource leaks,
+             improper exception handling, magic numbers, God classes]
+            [If none: "No improvements suggested."]
+
+            ## 🔒 Security Concerns
+            [SQL injection, hardcoded secrets, insecure deserialization,
+             missing input validation, sensitive data in logs]
+            [If none: "No security concerns found."]
+
+            ## 🧪 Test Coverage
+            [Are JUnit 5 / Mockito tests present? What is missing?
+             What edge cases and boundary values should be tested?]
+
+            ## ⚡ Performance
+            [N+1 queries, inefficient collections, unnecessary object creation,
+             blocking calls, missing pagination]
+            [If none: "No performance concerns."]
+
+            ## 🟢 Positives
+            [Clean design, good patterns, proper Java features, well-named methods]
+
+            ## 📊 Score
+            X/10
+
+            ## ✅ Verdict
+            APPROVE | REQUEST_CHANGES | COMMENT — [one sentence reason]
+
+          claude_args: |
+            --max-turns 5
